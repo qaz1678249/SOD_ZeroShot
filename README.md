@@ -10,7 +10,7 @@ And then we are going to use zero-shot learning to classify seen and unseen obje
 ## Prerequisites
 1. Linux
 2. Matlab 
-3. Caffe & Matcaffe (**We use the official master branch downloaded on 4/1/2016. Previous versions may not be compatible.**)
+3. Caffe & Matcaffe (**Previous than 4/1/2016 versions may not be compatible.**)
 
 ## Quick Start for Salient Object Detection
 1. Unzip the files to a local folder (denoted as **root_folder**).
