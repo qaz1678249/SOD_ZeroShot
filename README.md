@@ -24,7 +24,5 @@ For convinence, we have uploaded the dataset on Google Cloud. Here is the [Link]
 2. Enter the **root_folder** and modify the Matcaffe path in **setup.m**.
 3. In Matlab, run **setup.m** and it will automatically download the pre-trained GoogleNet model.
 4. Run **demo.m**.
-
-## Miscs
 To change CNN models or other configurations, please check **getParam.m**.
 
