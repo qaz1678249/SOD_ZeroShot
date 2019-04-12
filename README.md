@@ -5,6 +5,7 @@ We use salient object detection method described in
 > [Jianming Zhang, Stan Sclaroff, Zhe Lin, Xiaohui Shen, Brian Price and Radomír Mech. "Unconstrained Salient Object Detection via Proposal Subset Optimization." CVPR, 2016.](http://cs-people.bu.edu/jmzhang/sod.html)
 
 This method aims at producing a highly compact set of detection windows for salient objects in uncontrained images, which may or may not contain salient objects.
+
 And then we are going to use zero-shot learning to classify seen and unseen objects.
 
 ## Prerequisites
