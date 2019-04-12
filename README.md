@@ -1,4 +1,4 @@
-# Unconstrained Salient Object Detection and Zero-shot Classification
+# Salient Object Detection and Zero-shot Classification
 
 We use salient object detection method described in
 
