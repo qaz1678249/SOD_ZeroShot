@@ -1,7 +1,5 @@
 # Unconstrained Salient Object Detection and Zero-shot Classification
 
-[![License](https://img.shields.io/packagist/l/doctrine/orm.svg)](LICENSE)
-
 We use salient object detection method described in
 
 > [Jianming Zhang, Stan Sclaroff, Zhe Lin, Xiaohui Shen, Brian Price and Radomír Mech. "Unconstrained Salient Object Detection via Proposal Subset Optimization." CVPR, 2016.](http://cs-people.bu.edu/jmzhang/sod.html)
