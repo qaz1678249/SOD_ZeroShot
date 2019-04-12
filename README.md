@@ -15,6 +15,8 @@ And then we are going to use zero-shot learning to classify seen and unseen obje
 ## Dataset
 We are using aPASCAL VOC2008(VOC with attributes). This dataset is provided by
 
+> [A. Farhadi, I. Endres, D. Hoiem, and D.A. Forsyth, “Describing Objects by their Attributes”, CVPR 2009.](http://vision.cs.uiuc.edu/attributes/)
+
 
 ## Quick Start for Salient Object Detection
 1. Unzip the files to a local folder (denoted as **root_folder**).
