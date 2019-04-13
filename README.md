@@ -12,6 +12,8 @@ And then we are going to use zero-shot learning to classify seen and unseen obje
 1. Linux
 2. Matlab 
 3. Caffe & Matcaffe (**Previous than 4/1/2016 versions may not be compatible.**)
+4. Tensorflow & Keras
+5. Python 2.7 & 3.5
 
 ## Dataset
 We are using aPASCAL VOC2008(VOC with attributes). This dataset is provided by
