@@ -5,6 +5,7 @@ from tensorflow.keras.layers import Dense
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras import backend as K
 from tensorflow.keras.layers.merge import _Merge
+from tensorflow.keras.layers import Layer
 
 
 num_seen = 5
@@ -28,34 +29,44 @@ Y =         # labels
 def wasserstein_loss(y_true, y_pred):
     return K.mean(y_true * y_pred)
 
-def cls_loss(y_true, y_pred):
-    return cls_weight * tf.keras.losses.categorical_crossentropy(y_true, y_pred)
 
 class RandomWeightedAverage(_Merge):
+    """
+    Merge x and x\tilde to x\hat
+    """
     def _merge_function(self, inputs):
         weights = K.random_uniform((batch_size, 1, 1, 1))
         return (weights * inputs[0]) + ((1 - weights) * inputs[1])
 
-def gradient_penalty_loss(y_true, y_pred, x_hat, gradient_penalty_weight):
-    # first get the gradients:
-    #   assuming: - that y_pred has dimensions (batch_size, 1)
-    #             - averaged_samples has dimensions (batch_size, nbr_features)
-    # gradients afterwards has dimension (batch_size, nbr_features), basically
-    # a list of nbr_features-dimensional gradient vectors
-    gradients = K.gradients(y_pred, x_hat)[0]
-    # compute the euclidean norm by squaring ...
-    gradients_sqr = K.square(gradients)
-    #   ... summing over the rows ...
-    gradients_sqr_sum = K.sum(gradients_sqr, axis=np.arange(1, len(gradients_sqr.shape)))
-    #   ... and sqrt
-    gradient_l2_norm = K.sqrt(gradients_sqr_sum)
-    # compute lambda * (1 - ||grad||)^2 still for each single sample
-    gradient_penalty = gradient_penalty_weight * K.square(1 - gradient_l2_norm)
-    # return the mean as loss over all the batch samples
-    return K.mean(gradient_penalty)
+
+class GrandNorm(Layer):
+    """
+    Layer to calculate the norm of the gradient
+    """
+    def __init__(self, **kwargs):
+        super(GrandNorm, self).__init__(**kwargs)
+
+    def build(self, input_shapes):
+        super(GrandNorm, self).build(input_shapes)
+
+    def call(self, inputs):
+        target, wrt = inputs
+        grads = K.gradients(target, wrt)
+        assert len(grads) == 1
+        grad = grads[0]
+        return K.sqrt(K.sum(K.batch_flatten(K.square(grad)), axis=1, keepdims=True))
+
+    def compute_output_shape(self, input_shapes):
+        return (input_shapes[1][0], 1)
+
 
 # Generator
 def build_G():
+    """
+    :return: keras Model with inputs: an Attribute Vector
+                                      a Noise Vector
+                              output: a CNN Feature Vector
+    """
     g_input_c = tf.keras.Input(shape=(attribute_dim, ))
     g_input_z = tf.keras.Input(shape=(noise_dim,))
     g_inputs = tf.keras.layers.concatenate([g_input_c, g_input_z])
@@ -68,6 +79,11 @@ def build_G():
 
 # Discriminator
 def build_D():
+    """
+    :return: keras Model with inputs: CNN Feature Vector
+                                      Attribute Vector
+                              output: wGAN output (real value)
+    """
     d_input_c = tf.keras.Input(shape=(attribute_dim,))
     d_input_X = tf.keras.Input(shape=(cnn_feature_dim,))
     d_inputs = tf.keras.layers.concatenate([d_input_X, d_input_c])
@@ -80,6 +96,9 @@ def build_D():
 
 # Train pre-trained softmax classifier for GAN
 def pre_train_cls():
+    """
+    :return:  a keras soft-max classifier, pre-trained with training data
+    """
     pre_cls = Sequential()
     pre_cls.add(Dense(num_seen, activation='softmax'))
 
@@ -90,46 +109,51 @@ def pre_train_cls():
                                     min_delta=0.001,
                                     patience=1,
                                     verbose=0)
-    pre_cls.fit(X_feature, Y, batch_size=128, epochs=20, callbacks=[early_stopping], shuffle=True, validation_split=0.1)
+    pre_cls.fit(X_train, Y_train, batch_size=128, epochs=20, callbacks=[early_stopping], shuffle=True, validation_split=0.1)
     pre_cls.trainable = False
     return pre_cls
 
-def build_G_model(G, D, cls):
-    D.trainable = False
-    gm_input_z = tf.keras.Input(shape=(noise_dim,))
-    gm_input_c = tf.keras.Input(shape=(attribute_dim,))
-    gen_features = G([gm_input_c, gm_input_z])
-    d = D([gen_features, gm_input_c])
-    y = cls(gen_features)
 
-    return Model(input=[gm_input_c, gm_input_z], output=[d, y])
-
-
-def build_D_model(G, D):
-    D.trainable = True
-    G.trainable = False
-    dm_input_z = tf.keras.Input(shape=(noise_dim,))
-    dm_input_X = tf.keras.Input(shape=(cnn_feature_dim,))
-    dm_input_c = tf.keras.Input(shape=(attribute_dim,))
-    gen_features = G([dm_input_c, dm_input_z])
-    fake = D([gen_features, dm_input_c])
-    real = D([dm_input_X, dm_input_c])
-    X_for_pen = RandomWeightedAverage()([dm_input_X, gen_features])
-    grad_pen = gradient_penalty()
 
 # predefine of all models
 G = build_G()
 D = build_D()
 pre_cls = pre_train_cls()
 
-G_model = build_G_model(G, D, cls)
+# define generator model for compiling
+D.trainable = False
+input_z = tf.keras.Input(shape=(noise_dim,))
+input_c = tf.keras.Input(shape=(attribute_dim,))
+gen_features = G([input_c, input_z])
+d = D([gen_features, input_c])
+y = pre_cls(gen_features)
 
-D_model = build_D_model(G, D, cls)
+G_model = Model(input=[input_c, input_z], output=[d, y])
+
+G_model.compile(optimizer=tf.keras.optimizers.Adam(0.0001, beta_1=0.5, beta_2=0.9),
+                        loss=[wasserstein_loss, 'categorical_crossentropy'],
+                loss_weights=[1, beta])
+
+# define discriminator model for compiling
+D.trainable = True
+G.trainable = False
+input_X = tf.keras.Input(shape=(cnn_feature_dim,))
+fake = D([gen_features, input_c])
+real = D([input_X, input_c])
+X_for_pen = RandomWeightedAverage()([input_X, gen_features])
+d_for_pen = D([X_for_pen, input_c])
+norm = GrandNorm()([d_for_pen, X_for_pen])
+
+D_model = Model(input=[input_X, input_c, input_z], output=[real, fake, norm])
+D_model.compile(optimizer=tf.keras.optimizers.Adam(0.0001, beta_1=0.5, beta_2=0.9),
+                        loss=[wasserstein_loss, wasserstein_loss, 'mse'],
+                loss_weights=[1, -1, lamda])
 
 
 # training GAN
 reals = np.ones((batch_size, 1))
 fakes = -np.ones((batch_size, 1))
+grad_pens = np.ones((batch_size, 1))
 
 for epoch in range(epochs):
 
@@ -137,9 +161,15 @@ for epoch in range(epochs):
     X_train =
     c_train =
     y_train =
+    for i in range(0, n_train, batch_size):
+        for j in range(D_iters):
+            # generate fake features
+            noise = np.random.normal(0, 1, (batch_size, noise_dim))
+            D_model.train_on_batch([X_batch, c_batch, noise], [reals, fakes, grad_pens])
 
-    # generate fake features
-    noise = np.random.normal(0, 1, (batch_size, noise_dim))
-    fake_samples = G.predict([c_train, noise])
+        noise = np.random.normal(0, 1, (batch_size, noise_dim))
+        G_model.train_on_batch([c_batch, noise], [reals, y_batch])
+
+
 
 
