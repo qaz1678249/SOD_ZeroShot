@@ -6,16 +6,58 @@ from keras.applications.resnet50 import preprocess_input
 from keras.models import Model
 import numpy as np
 
-#this is for extracting and saving features with pre-trained RESNET50 and saveing the one-hot labels & attribiutes as well.
- 
+#this is for extracting features with pre-trained RESNET50
+
+#if 1 labels are onehot
+onehot_mode = 0
+
+
 #6340 trainingdata
 base_model = ResNet50(weights='imagenet')
 model = Model(inputs=base_model.input, outputs=base_model.get_layer('avg_pool').output)
 
 base_img_path = "/home/max/Salient/ZeroS/VOCtrain/VOC2008/croppedtrain/"
+atts = open("/home/max/Salient/ZeroS/VOCtrain/VOC2008/croppedlabel/train_label_att.txt","r")
+labels = open("/home/max/Salient/ZeroS/attribute_data/class20_names.txt","r")
 
+final_out_onehot = []
+final_out_att = []
 final_out_feature = []
-for i in range(6340):
+
+final_out_unseen_onehot = []
+final_out_unseen_att = []
+final_out_unseen_feature = []
+
+
+seen_label_dict = dict()
+unseen_label_dict = dict()
+seen_i = 0
+unseen_i = 0
+for line in labels:
+	line=line[0:len(line)-1]
+	if not(line=="bus" or line=="diningtable"):
+		seen_label_dict[line] = seen_i
+		seen_i+=1
+	else:
+		unseen_label_dict[line] = unseen_i
+		unseen_i+=1
+
+seen_label_num = seen_i
+unseen_label_num = unseen_i
+i = 0
+
+for line in atts:
+	temp = line.split()
+
+	atts_i = np.zeros(66, dtype = np.float32)
+	for j in range(64):
+		atts_i[j] = float(int(temp[j+1]))
+	if (temp[0]=="cat"):
+		atts_i[64] = 1.0
+	if (temp[0]=="dog"):
+		atts_i[65] = 1.0
+
+
 	img_path = base_img_path + str(i) + ".jpg"
 	img = image.load_img(img_path, target_size=(224, 224))
 	x = image.img_to_array(img)
@@ -25,37 +67,40 @@ for i in range(6340):
 	features_2048 = model.predict(x)
 	features_2048 = features_2048.reshape(-1)
 
-	final_out_feature.append(features_2048)
-	print(i)
 
-atts = open("/home/max/Salient/ZeroS/VOCtrain/VOC2008/croppedlabel/train_label_att.txt","r")
-labels = open("/home/max/Salient/ZeroS/attribute_data/class_names.txt","r")
+	if not(temp[0]=="bus" or temp[0]=="diningtable"):
+		if (onehot_mode == 1):
+			onehot = np.zeros(seen_label_num, dtype=np.float32)
+			onehot[seen_label_dict[temp[0]]]=1.0
+		else:
+			onehot = seen_label_dict[temp[0]]
 
-final_out_onehot = []
-final_out_att = []
-label_dict = dict()
-i = 0
-for line in labels:
-	line=line[0:len(line)-1]
-	label_dict[line] = i
-	i+=1
+		final_out_onehot.append(onehot)
+		final_out_att.append(atts_i)
+		final_out_feature.append(features_2048)
+	else:
+		if (onehot_mode == 1):
+			onehot = np.zeros(unseen_label_num, dtype=np.float32)
+			onehot[unseen_label_dict[temp[0]]]=1.0
+		else:
+			onehot = unseen_label_dict[temp[0]]
 
-label_num = i
-i = 0
-for line in atts:
-	temp = line.split()
-	onehot = np.zeros(label_num, dtype=np.float32)
-	onehot[label_dict[temp[0]]]=1.0
-	final_out_onehot.append(onehot)
+		final_out_unseen_onehot.append(onehot)
+		final_out_unseen_att.append(atts_i)
+		final_out_unseen_feature.append(features_2048)
 
-	atts_i = np.zeros(64, dtype = np.float32)
-	for j in range(64):
-		atts_i[j] = float(int(temp[j+1]))
-	final_out_att.append(atts_i)
 	i+=1
 	print(i)
 
 print((np.array(final_out_onehot)).shape)
 print((np.array(final_out_att)).shape)
 print((np.array(final_out_feature)).shape)
-np.savez("features_attributes_labels", features=np.array(final_out_feature), attributes=np.array(final_out_att), labels=final_out_onehot)
+print((np.array(final_out_unseen_onehot)).shape)
+print((np.array(final_out_unseen_att)).shape)
+print((np.array(final_out_unseen_feature)).shape)
+np.savez("features_attributes_labels", features = np.array(final_out_feature), 
+					attributes = np.array(final_out_att), 
+					labels = np.array(final_out_onehot),
+					unseen_features = np.array(final_out_unseen_feature),
+					unseen_attributes = np.array(final_out_unseen_att),
+					unseen_labels = np.array(final_out_unseen_onehot) )
