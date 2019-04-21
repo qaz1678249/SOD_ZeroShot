@@ -1,175 +1,384 @@
-import tensorflow as tf
+import torch
+import torch.nn as nn
+import torch.autograd as autograd
+import torch.optim as optim
+import torch.backends.cudnn as cudnn
+import torch.nn.functional as F
+from torch.autograd import Variable
 import numpy as np
-from tensorflow.keras.models import Model, Sequential
-from tensorflow.keras.layers import Dense
-from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras import backend as K
-from tensorflow.keras.layers.merge import _Merge
-from tensorflow.keras.layers import Layer
+from torch.utils.data import TensorDataset, DataLoader, random_split
 
 
-num_seen = 5
+file_name = ''
 
-attribute_dim = 20
-noise_dim = 128
-cnn_feature_dim = 2048
+noise_dim = 32
+cnnfeature_dim = 2048
+attribute_dim = 66
 
-lamda = 10
-beta = 1
+learning_rate = 0.0001
+epochs = 2000
 
-epochs = 50
+# train using gpu
+cuda = True
+
+# pretrain classifier parameters
+pre_cls_epochs = 20
 batch_size = 64
-D_iters = 5
 
+# parameters for generator
+g_fc1 = 4096
+g_fc2 = 2048
+
+# parameters for discriminator
+d_fc1 = 4096
+
+pen_weight = 10
 cls_weight = 1
 
-X_feature = # CNN feature inputs
-Y =         # labels
+gzsl = True
+gen_samples = 50
 
-def wasserstein_loss(y_true, y_pred):
-    return K.mean(y_true * y_pred)
+class Classifier(nn.Module):
+    def __init__(self, in_dim, num_cls):
+        super(Classifier, self).__init__()
+        self.fc = nn.Linear(in_dim, num_cls)
+
+    def forward(self, x):
+        x = self.fc(x)
+        return F.log_softmax(x)
 
 
-class RandomWeightedAverage(_Merge):
+class Generator(nn.Module):
+    def __init__(self):
+        super(Generator, self).__init__()
+        self.g_fc1 = nn.Linear(noise_dim + attribute_dim, g_fc1)
+        self.g_fc2 = nn.Linear(g_fc1, g_fc2)
+        self.g_fc3 = nn.Linear(g_fc2, cnnfeature_dim)
+
+    def forward(self, noise, attributes):
+        x = torch.cat((noise, attributes), 1)
+        x = F.leaky_relu(self.g_fc1(x), negative_slope=0.2)
+        x = F.leaky_relu(self.g_fc2(x), negative_slope=0.2)
+        x = F.relu(self.g_fc3(x))
+        return x
+
+
+class Discriminator(nn.Module):
+    def __init__(self):
+        super(Discriminator, self).__init__()
+        self.d_fc1 = nn.Linear(cnnfeature_dim + attribute_dim, d_fc1)
+        self.d_fc2 = nn.Linear(d_fc1, 1)
+
+    def forward(self, cnn_features, attributes):
+        x = torch.cat((cnn_features, attributes), 1)
+        x = F.leaky_relu(self.d_fc1(x), negative_slope=0.2)
+        x = self.d_fc2(x)
+        return x
+
+
+def calc_gradient_penalty(netD, real_data, fake_data, input_att):
+    #print real_data.size()
+    alpha = torch.rand(batch_size, 1)
+    alpha = alpha.expand(real_data.size())
+    if cuda:
+        alpha = alpha.cuda()
+
+    interpolates = alpha * real_data + ((1 - alpha) * fake_data)
+
+    if cuda:
+        interpolates = interpolates.cuda()
+
+    interpolates = Variable(interpolates, requires_grad=True)
+
+    disc_interpolates = netD(interpolates, Variable(input_att))
+
+    ones = torch.ones(disc_interpolates.size())
+    if cuda:
+        ones = ones.cuda()
+
+    gradients = autograd.grad(outputs=disc_interpolates, inputs=interpolates,
+                              grad_outputs=ones,
+                              create_graph=True, retain_graph=True, only_inputs=True)[0]
+
+    gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean() * pen_weight
+    return gradient_penalty
+
+
+def train_classifier(cls, dataset, split):
     """
-    Merge x and x\tilde to x\hat
+    train the softmax classifier using given dataset
+    :param cls: softmax classifier model
+    :param data: torch.utils.data.Dataset the dataset to be trained on
+    :param split: list to split dataset into training set and valid set
+    :return: a trained classifier model.
     """
-    def _merge_function(self, inputs):
-        weights = K.random_uniform((batch_size, 1, 1, 1))
-        return (weights * inputs[0]) + ((1 - weights) * inputs[1])
+    if cuda:
+        cls.cuda()
+
+    [trainset, validset] = random_split(dataset, split)
+    trainloader = DataLoader(trainset, batch_size=batch_size, shuffle=True)
+    valloader = DataLoader(validset, batch_size=split[1], shuffle=False)
+    optimizer = optim.SGD(cls.parameters(), lr=0.0001, momentum=0.9)
+
+    cls.train()
+    train_loss, train_accu, valid_loss, valid_accu = [], [], [], []
+    i = 0
+    for epoch in range(pre_cls_epochs):
+        for features, labels in trainloader:
+            # send to gpu
+            if cuda:
+                features, labels = features.cuda(), labels.cuda()
+
+            optimizer.zero_grad()
+            outputs = cls(features)
+            loss = F.cross_entropy(outputs, labels)
+            loss.backward()
+            train_loss.append(loss.item())
+            optimizer.step()
+            predictions = outputs.data.max(1)[1]
+            accuracy = np.sum(predictions.cpu().numpy() == labels.cpu().numpy()) / batch_size * 100
+            train_accu.append(accuracy)
+            if i % 100 == 0:
+                v_correct = 0
+                for v_images, v_labels in valloader:
+                    if cuda:
+                        v_images, v_labels = v_images.cuda(), v_labels.cuda()
+                    v_outputs = cls(v_images)
+                    val_loss = F.cross_entropy(v_outputs, v_labels)
+                    valid_loss.append(val_loss.item())
+                    v_predictions = v_outputs.data.max(1)[1]
+                    v_correct += v_predictions.eq(v_labels.data).sum()
+
+                    v_accuracy = v_correct.cpu().numpy() / split[1] * 100
+                valid_accu.append(v_accuracy)
+                # print('Train step: {}\tTrain loss:{:.3f}\tValid loss:{:.3f}\tTrain accuracy: {:.3f}\tValid accuracy: {:.3f}'.format(i,
+                #                                                                                                  loss.item(),
+                #                                                                                                  val_loss.item(),
+                #                                                                                                  accuracy,
+                #                                                                                                  v_accuracy))
+                if len(valid_loss)>1:
+                    if valid_loss[-1]>valid_loss[-2]:
+                        break
+            i += 1
+    return cls
 
 
-class GrandNorm(Layer):
-    """
-    Layer to calculate the norm of the gradient
-    """
-    def __init__(self, **kwargs):
-        super(GrandNorm, self).__init__(**kwargs)
-
-    def build(self, input_shapes):
-        super(GrandNorm, self).build(input_shapes)
-
-    def call(self, inputs):
-        target, wrt = inputs
-        grads = K.gradients(target, wrt)
-        assert len(grads) == 1
-        grad = grads[0]
-        return K.sqrt(K.sum(K.batch_flatten(K.square(grad)), axis=1, keepdims=True))
-
-    def compute_output_shape(self, input_shapes):
-        return (input_shapes[1][0], 1)
+def sample():
+    batch_feature, batch_att, batch_label = next(iter(trainloader))
+    input_res.copy_(batch_feature)
+    input_att.copy_(batch_att)
+    input_label.copy_(batch_label)
 
 
-# Generator
-def build_G():
-    """
-    :return: keras Model with inputs: an Attribute Vector
-                                      a Noise Vector
-                              output: a CNN Feature Vector
-    """
-    g_input_c = tf.keras.Input(shape=(attribute_dim, ))
-    g_input_z = tf.keras.Input(shape=(noise_dim,))
-    g_inputs = tf.keras.layers.concatenate([g_input_c, g_input_z])
-    g1 = Dense(4096, activation='linear')(g_inputs)
-    g1_lr = tf.keras.layers.LeakyReLU(alpha=0.2)(g1)
-    g2 = Dense(cnn_feature_dim, activation='relu')(g1_lr)
+def generate_syn_feature(netG, classes, attribute, num):
+    nclass = classes.size(0)
+    syn_feature = torch.empty(nclass * num, cnnfeature_dim).type(torch.FloatTensor)
+    syn_label = torch.empty(nclass * num).type(torch.LongTensor)
+    syn_att = torch.empty(num, attribute_dim).type(torch.FloatTensor)
+    syn_noise = torch.empty(num, noise_dim).type(torch.FloatTensor)
+    if cuda:
+        syn_att = syn_att.cuda()
+        syn_noise = syn_noise.cuda()
 
-    return Model(input = [g_input_c, g_input_z], output=g2)
+    for i in range(nclass):
+        iclass = classes[i]
+        iclass_att = attribute[iclass]
+        syn_att.copy_(iclass_att.repeat(num, 1))
+        syn_noise.normal_(0, 1)
+        output = netG(Variable(syn_noise, volatile=True), Variable(syn_att, volatile=True))
+        syn_feature.narrow(0, i * num, num).copy_(output.data.cpu())
+        syn_label.narrow(0, i * num, num).fill_(iclass)
 
-
-# Discriminator
-def build_D():
-    """
-    :return: keras Model with inputs: CNN Feature Vector
-                                      Attribute Vector
-                              output: wGAN output (real value)
-    """
-    d_input_c = tf.keras.Input(shape=(attribute_dim,))
-    d_input_X = tf.keras.Input(shape=(cnn_feature_dim,))
-    d_inputs = tf.keras.layers.concatenate([d_input_X, d_input_c])
-    d1 = Dense(2048, activation='linear')(d_inputs)
-    d1_lr = tf.keras.layers.LeakyReLU(alpha=0.2)(d1)
-    d2 = Dense(1, activation='linear')(d1_lr)
-
-    return Model(input=[d_input_X, d_input_c], output=d2)
+    return syn_feature, syn_label
 
 
-# Train pre-trained softmax classifier for GAN
-def pre_train_cls():
-    """
-    :return:  a keras soft-max classifier, pre-trained with training data
-    """
-    pre_cls = Sequential()
-    pre_cls.add(Dense(num_seen, activation='softmax'))
+if __name__ =="__main__":
+    # load data
+    data = np.load('features_attributes_labels.npz')
 
-    pre_cls.summary()
-    cls_opt = tf.keras.optimizers.Adam(lr=0.001, beta_1=0.5, beta_2=0.999, epsilon=None, decay=0.0, amsgrad=False)
-    pre_cls.complie(loss='softmax_cross_entropy', optimizer=cls_opt)
-    early_stopping = EarlyStopping(monitor='val_loss',
-                                    min_delta=0.001,
-                                    patience=1,
-                                    verbose=0)
-    pre_cls.fit(X_train, Y_train, batch_size=128, epochs=20, callbacks=[early_stopping], shuffle=True, validation_split=0.1)
-    pre_cls.trainable = False
-    return pre_cls
+    cnn_features = data['features']
+    attributes = data['attributes']
+    labels = data['labels']
+    # labels = np.argmax(labels, axis=1)
+    unseen_features = data['unseen_features']
+    unseen_attributes = data['unseen_attributes']
+    unseen_labels = data['unseen_labels']
 
+    num_samples = labels.shape[0]
+    split = [int(np.ceil(num_samples * 0.9)), num_samples - int(np.ceil(num_samples * 0.9))]
+    num_seen_cls = np.max(labels)
+    num_unseen_cls = 1
+    # num_unseen_cls = unseen_cls.shape[0]
 
+    pre_cls_dataset = TensorDataset(torch.Tensor(cnn_features), torch.Tensor(labels).type(torch.LongTensor))
+    dataset = TensorDataset(torch.Tensor(cnn_features), torch.Tensor(attributes), torch.Tensor(labels).type(torch.LongTensor))
+    unseen_dataset = TensorDataset(torch.Tensor(unseen_features), torch.Tensor(unseen_attributes), torch.Tensor(unseen_labels).type(torch.LongTensor))
+    [trainset, validset] = random_split(dataset, split)
+    trainloader = DataLoader(trainset, batch_size=batch_size, shuffle=True)
+    valloader = DataLoader(validset, batch_size=split[1], shuffle=False)
+    unseenloader = DataLoader(unseen_dataset, unseen_labels.shape[0], shuffle=False)
 
-# predefine of all models
-G = build_G()
-D = build_D()
-pre_cls = pre_train_cls()
-
-# define generator model for compiling
-D.trainable = False
-input_z = tf.keras.Input(shape=(noise_dim,))
-input_c = tf.keras.Input(shape=(attribute_dim,))
-gen_features = G([input_c, input_z])
-d = D([gen_features, input_c])
-y = pre_cls(gen_features)
-
-G_model = Model(input=[input_c, input_z], output=[d, y])
-
-G_model.compile(optimizer=tf.keras.optimizers.Adam(0.0001, beta_1=0.5, beta_2=0.9),
-                        loss=[wasserstein_loss, 'categorical_crossentropy'],
-                loss_weights=[1, beta])
-
-# define discriminator model for compiling
-D.trainable = True
-G.trainable = False
-input_X = tf.keras.Input(shape=(cnn_feature_dim,))
-fake = D([gen_features, input_c])
-real = D([input_X, input_c])
-X_for_pen = RandomWeightedAverage()([input_X, gen_features])
-d_for_pen = D([X_for_pen, input_c])
-norm = GrandNorm()([d_for_pen, X_for_pen])
-
-D_model = Model(input=[input_X, input_c, input_z], output=[real, fake, norm])
-D_model.compile(optimizer=tf.keras.optimizers.Adam(0.0001, beta_1=0.5, beta_2=0.9),
-                        loss=[wasserstein_loss, wasserstein_loss, 'mse'],
-                loss_weights=[1, -1, lamda])
-
-
-# training GAN
-reals = np.ones((batch_size, 1))
-fakes = -np.ones((batch_size, 1))
-grad_pens = np.ones((batch_size, 1))
-
-for epoch in range(epochs):
-
-    # get input batch
-    X_train =
-    c_train =
-    y_train =
-    for i in range(0, n_train, batch_size):
-        for j in range(D_iters):
-            # generate fake features
-            noise = np.random.normal(0, 1, (batch_size, noise_dim))
-            D_model.train_on_batch([X_batch, c_batch, noise], [reals, fakes, grad_pens])
-
-        noise = np.random.normal(0, 1, (batch_size, noise_dim))
-        G_model.train_on_batch([c_batch, noise], [reals, y_batch])
+    pre_cls = Classifier(cnnfeature_dim, num_seen_cls)
+    print(pre_cls)
+    train_classifier(pre_cls, pre_cls_dataset, split)
+    torch.save(pre_cls, 'pre_trained_cls')
+    # OR LOAD PRETRAINED CLASSIFIER
+    # pre_cls = torch.load('pre_trained_cls')
+    pre_cls.eval()
 
 
 
+    # train GAN
+    # dataloader = DataLoader(dataset, shuffle=True, batch_size=batch_size)
 
+    input_res = torch.empty(batch_size, cnnfeature_dim).type(torch.FloatTensor)
+    input_att = torch.empty(batch_size, attribute_dim).type(torch.FloatTensor)
+    noise = torch.empty(batch_size, noise_dim).type(torch.FloatTensor)
+    one = torch.Tensor([1]).type(torch.FloatTensor)
+    mone = one * -1
+    input_label = torch.empty(batch_size).type(torch.LongTensor)
+    # final_label = torch.FloatTensor(batch_size, num_all_cls)
+
+    net_G = Generator()
+    print(net_G)
+    net_D = Discriminator()
+    print(net_D)
+
+    cls_criterion = nn.CrossEntropyLoss()
+
+    if cuda:
+        net_D.cuda()
+        net_G.cuda()
+        input_res = input_res.cuda()
+        noise, input_att = noise.cuda(), input_att.cuda()
+        one = one.cuda()
+        mone = mone.cuda()
+        cls_criterion.cuda()
+        input_label = input_label.cuda()
+
+    for p in pre_cls.parameters():  # set requires_grad to False
+        p.requires_grad = False
+
+    optimizerD = optim.Adam(net_D.parameters(), lr=learning_rate, betas=(0.5, 0.999))
+    optimizerG = optim.Adam(net_G.parameters(), lr=learning_rate, betas=(0.5, 0.999))
+    vs_acc, vu_acc, H = [], [], []
+
+    for epoch in range(epochs):
+        FP = 0
+        mean_lossD = 0
+        mean_lossG = 0
+        for i in range(0, num_samples, batch_size):
+
+            for p in net_D.parameters():  # reset requires_grad
+                p.requires_grad = True  # they are set to False below in netG update
+
+            for iter_d in range(5):
+                sample()
+                net_D.zero_grad()
+                # train with realG
+                # sample a mini-batch
+                input_resv = Variable(input_res)
+                input_attv = Variable(input_att)
+
+                criticD_real = net_D(input_resv, input_attv)
+                criticD_real = criticD_real.mean()
+                criticD_real.backward(mone)
+
+                # train with fakeG
+                noise.normal_(0, 1)
+                noisev = Variable(noise)
+                fake = net_G(noisev, input_attv)
+                fake_norm = fake.data[0].norm()
+                sparse_fake = fake.data[0].eq(0).sum()
+                criticD_fake = net_D(fake.detach(), input_attv)
+                criticD_fake = criticD_fake.mean()
+                criticD_fake.backward(one)
+
+                # gradient penalty
+                gradient_penalty = calc_gradient_penalty(net_D, input_res, fake.data, input_att)
+                gradient_penalty.backward()
+
+                Wasserstein_D = criticD_real - criticD_fake
+                D_cost = criticD_fake - criticD_real + gradient_penalty
+                optimizerD.step()
+
+            ############################
+            # (2) Update G network: optimize WGAN-GP objective, Equation (2)
+            ###########################
+            for p in net_D.parameters():  # reset requires_grad
+                p.requires_grad = False  # avoid computation
+
+            net_G.zero_grad()
+            input_attv = Variable(input_att)
+            noise.normal_(0, 1)
+            noisev = Variable(noise)
+            fake = net_G(noisev, input_attv)
+            criticG_fake = net_D(fake, input_attv)
+            criticG_fake = criticG_fake.mean()
+            G_cost = -criticG_fake
+            # classification loss
+            c_errG = cls_criterion(pre_cls(fake), Variable(input_label))
+            errG = G_cost + cls_weight * c_errG
+            errG.backward()
+            optimizerG.step()
+
+        mean_lossG /= num_samples / batch_size
+        mean_lossD /= num_samples / batch_size
+        print('[%d/%d] Loss_D: %.4f Loss_G: %.4f, Wasserstein_dist: %.4f, c_errG:%.4f'
+              % (epoch, epochs, D_cost.item(), G_cost.item(), Wasserstein_D.item(), c_errG.item()))
+
+        # evaluate the model, set G to evaluation mode
+        net_G.eval()
+        # Generalized zero-shot learning
+        if gzsl:
+            syn_feature, syn_label = generate_syn_feature(net_G, torch.Tensor(unseen_labels).type(torch.LongTensor), torch.Tensor(unseen_attributes).type(torch.FloatTensor), gen_samples)
+            train_X = torch.cat((torch.Tensor(cnn_features), syn_feature), 0)
+            train_Y = torch.cat((torch.Tensor(labels).type(torch.LongTensor), syn_label), 0)
+            clsdataset = TensorDataset(train_X, train_Y)
+            nclass = num_seen_cls + num_unseen_cls
+            cls = Classifier(cnnfeature_dim, nclass)
+            n_tr = int(np.ceil(0.9 * (num_samples + gen_samples * unseen_labels.shape[0])))
+            n_v = num_samples + gen_samples * unseen_labels.shape[0] - n_tr
+            split_gzsl = [n_tr, n_v]
+            train_classifier(cls, clsdataset, split_gzsl)
+            cls.eval()
+            s_correct = 0
+            for s_images, s_attributes, s_labels in valloader:
+                if cuda:
+                    s_images, s_labels = s_images.cuda(), s_labels.cuda()
+                s_outputs = cls(s_images)
+                s_predictions = s_outputs.data.max(1)[1]
+                s_correct += s_predictions.eq(s_labels.data).sum()
+
+                s_accuracy = s_correct.cpu().numpy() / split[1] * 100
+            vs_acc.append(s_accuracy)
+            u_correct = 0
+            for u_images, u_attributes, u_labels in unseenloader:
+                if cuda:
+                    u_images, u_labels = u_images.cuda(), u_labels.cuda()
+                u_outputs = cls(u_images)
+                u_predictions = u_outputs.data.max(1)[1]
+                u_correct += u_predictions.eq(u_labels.data).sum()
+
+                u_accuracy = u_correct.cpu().numpy() / unseen_labels.shape[0] * 100
+            vu_acc.append(u_accuracy)
+
+            h = 2*s_accuracy*u_accuracy/(s_accuracy+u_accuracy)
+            H.append(h)
+            print('unseen=%.4f, seen=%.4f, h=%.4f' % (u_accuracy, s_accuracy, h))
+            torch.save(cls, 'pre_trained_cls')
+        # # Zero-shot learning
+        # else:
+        #     syn_feature, syn_label = generate_syn_feature(net_G, unseen_labels, unseen_attributes, gen_samples)
+        #     clsdataset = TensorDataset((syn_feature, syn_label))
+        #     cls = Classifier(cnnfeature_dim, num_unseen_cls)
+        #     split_zsl = [0.9 * gen_samples * num_unseen_cls, 0.1 * gen_samples * num_unseen_cls]
+        #     train_classifier(cls, clsdataset, split_zsl)
+        #     acc = cls.acc
+        #     print('unseen class accuracy= ', acc)
+
+        # reset G to training mode
+        net_G.train()
+
+        torch.save(net_D, 'net_D')
+        torch.save(net_G, 'net_G')
