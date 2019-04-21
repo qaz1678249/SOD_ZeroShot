@@ -11,8 +11,6 @@ import numpy as np
 #if 1 labels are onehot
 onehot_mode = 0
 
-
-#6340 trainingdata
 base_model = ResNet50(weights='imagenet')
 model = Model(inputs=base_model.input, outputs=base_model.get_layer('avg_pool').output)
 
